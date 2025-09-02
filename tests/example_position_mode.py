@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import AsyncExitStack
 
 import numpy as np
 
@@ -32,58 +33,66 @@ TRAJECTORIES = np.array([TRAJECTORY_SINGLE for _ in range(9)]).T
 
 
 async def async_main():
-    actuators = await asyncio.gather(
-        Actuator.create(A4_SERIAL_ADDRESS, BAUDRATE),
-        Actuator.create(A5_SERIAL_ADDRESS, BAUDRATE),
-        Actuator.create(A6_SERIAL_ADDRESS, BAUDRATE),
-        Actuator.create(A11_SERIAL_ADDRESS, BAUDRATE),
-        Actuator.create(A12_SERIAL_ADDRESS, BAUDRATE),
-        Actuator.create(A21_SERIAL_ADDRESS, BAUDRATE),
-        Actuator.create(A22_SERIAL_ADDRESS, BAUDRATE),
-        Actuator.create(A31_SERIAL_ADDRESS, BAUDRATE),
-        Actuator.create(A32_SERIAL_ADDRESS, BAUDRATE),
-    )
+    async with AsyncExitStack() as stack:
+        enterers = [
+            stack.enter_async_context(Actuator(addr, BAUDRATE, 0.1, 1, 3))
+            for addr in [
+                A4_SERIAL_ADDRESS,
+                A5_SERIAL_ADDRESS,
+                A6_SERIAL_ADDRESS,
+                A11_SERIAL_ADDRESS,
+                A12_SERIAL_ADDRESS,
+                A21_SERIAL_ADDRESS,
+                A22_SERIAL_ADDRESS,
+                A31_SERIAL_ADDRESS,
+                A32_SERIAL_ADDRESS,
+            ]
+        ]
+        actuators = await asyncio.gather(*enterers)
 
-    # set all actuators to sleep mode
-    for a in actuators:
-        while await a.get_mode() != ORCA_MODE.SleepMode:
-            await a.set_mode(ORCA_MODE.SleepMode)
+        # set all actuators to sleep mode
+        for a in actuators:
+            while await a.get_mode() != ORCA_MODE.SleepMode:
+                await a.set_mode(ORCA_MODE.SleepMode)
 
-    kp = 3000
-    ki = 300
-    kdv = 000
-    kde = 500
-    time_step = 25
+        kp = 3000
+        ki = 300
+        kdv = 000
+        kde = 500
+        time_step = 25
 
-    # TUNE PID
-    await asyncio.gather(
-        *[a.tune_pid_controller(300000, kp, ki, kdv, kde) for a in actuators]
-    )
+        # TUNE PID
+        await asyncio.gather(
+            *[a.tune_pid_controller(300000, kp, ki, kdv, kde) for a in actuators]
+        )
 
-    # set all actuators to position mode
-    for a in actuators:
-        while await a.get_mode() != ORCA_MODE.PositionMode:
-            await a.set_mode(ORCA_MODE.PositionMode)
+        # set all actuators to position mode
+        for a in actuators:
+            while await a.get_mode() != ORCA_MODE.PositionMode:
+                await a.set_mode(ORCA_MODE.PositionMode)
 
-    # position commands
-    for trajectory_index, rho in enumerate(TRAJECTORIES):
-        print(f"Trajectory point {trajectory_index}")
+        # position commands
+        for trajectory_index, rho in enumerate(TRAJECTORIES):
+            print(f"Trajectory point {trajectory_index}")
 
-        try:
-            await asyncio.gather(
-                *[a.position_command(rho[index]) for index, a in enumerate(actuators)]
-            )
-        except Exception as e:
-            print(f"Error during trajectory {trajectory_index}: {e}")
+            try:
+                await asyncio.gather(
+                    *[
+                        a.position_command(rho[index])
+                        for index, a in enumerate(actuators)
+                    ]
+                )
+            except Exception as e:
+                print(f"Error during trajectory {trajectory_index}: {e}")
 
-        await asyncio.sleep(time_step * 1e-3)  # 25ms
+            # await asyncio.sleep(time_step * 1e-3)  # 25ms
 
-    # set all actuators to sleep mode
-    for a in actuators:
-        while await a.get_mode() != ORCA_MODE.SleepMode:
-            await a.set_mode(ORCA_MODE.SleepMode)
+        # set all actuators to sleep mode
+        for a in actuators:
+            while await a.get_mode() != ORCA_MODE.SleepMode:
+                await a.set_mode(ORCA_MODE.SleepMode)
 
-    print("Done!")
+        print("Done!")
 
 
 if __name__ == "__main__":

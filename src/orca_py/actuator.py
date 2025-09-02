@@ -1,4 +1,5 @@
 import struct
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from pymodbus import ExceptionResponse
@@ -30,185 +31,122 @@ def _int32_to_uint16s(value):
     return lower_16, upper_16
 
 
+@dataclass(slots=True)
 class Actuator:
+    comport: str
+    baudrate: int
+    reconnect_delay: float
+    timeout: float
+    retries: int
+    dev_id: int = 1
+    client: AsyncModbusSerialClient = field(
+        init=False,
+    )
 
-    # use a class method to initialize the class while await for async connection
-    @classmethod
-    async def create(cls, comport: str, baudrate: int):
-        """
-        Asynchronous factory method to initialize the class with an asynchronous operation.
-        """
-        actuator = cls(comport, baudrate)
-        if not await actuator.__client.connect():
-            raise ConnectionError(f"Failed to connect to {comport}.")
-        return actuator
-
-    # do not directly instantiate this class
-    def __init__(self, comport: str, baudrate: int):
-        self.__client = AsyncModbusSerialClient(
-            comport, parity="E", baudrate=baudrate, timeout=0.1, retries=3
+    async def __aenter__(self):
+        self.client = AsyncModbusSerialClient(
+            self.comport,
+            baudrate=self.baudrate,
+            parity="E",
+            reconnect_delay=self.reconnect_delay,
+            timeout=self.timeout,
+            retries=self.retries,
         )
+        self.client.register(OrcaStreamManageResponsePDU)
+        self.client.register(OrcaStreamCommandResponsePDU)
+        self.client.register(OrcaStreamReadResponsePDU)
+        self.client.register(OrcaStreamWriteResponsePDU)
+        assert await self.client.connect(), f"Failed to connect to {self.comport}."
+        return self
 
-    @property
-    def client(self):
-        return self.__client
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.set_mode(ORCA_MODE.SleepMode)
+        self.client.close()
 
-    ################################
-    # Base ModBus Communication Functions
-    ################################
-
-    # write single register
-    async def write_register(self, register_address: int, value: int):
-        if not self.__client.connected:
-            raise RuntimeError("Client is not connected.")
-        return await self.__client.write_register(register_address, value)
-
-    # write multiple registers
-    async def write_multi_registers(
-        self,
-        registers_start_address: int,
-        register_data: list[int],
-    ):
-        if not self.__client.connected:
-            raise RuntimeError("Client is not connected.")
-        return await self.__client.write_registers(
-            registers_start_address,
-            register_data,
-            # no_response_expected=True,
-        )
-
-    # read multiple registers
-    async def read_registers(
-        self, registers_start_address: int, num_registers: int = 1
-    ):
-        if not self.__client.connected:
-            raise RuntimeError("Client is not connected.")
-        return await self.__client.read_holding_registers(
-            registers_start_address, count=num_registers
-        )
-
-    ################################
-    # Orca Functions
-    ################################
-
-    # Change Orca's mode of operation
     async def set_mode(self, mode: ORCA_MODE):
-        return await self.write_register(ORCA_REGISTER.CTRL_REG_3.value.address, mode)
+        return await self.client.write_register(
+            ORCA_REGISTER.CTRL_REG_3.value.address, mode
+        )
 
     async def get_mode(self):
         return ORCA_MODE(
             (
-                await self.read_registers(ORCA_REGISTER.MODE_OF_OPERATION.value.address)
+                await self.client.read_holding_registers(
+                    ORCA_REGISTER.MODE_OF_OPERATION.value.address
+                )
             ).registers[0]
         )
 
-    # Trigger Kinematic Motion
+    async def tune_pid_controller(
+        self, saturation: int, p_gain: int, i_gain: int, dv_gain: int, de_gain: int
+    ):
+        saturationL, saturationH = _int32_to_uint16s(saturation)
+        configuration = [p_gain, i_gain, dv_gain, de_gain, saturationL, saturationH]
+        return await self.client.write_registers(
+            ORCA_REGISTER.PC_PGAIN.value.address, configuration
+        )
+
+    async def position_command(self, position: int):
+        return await self.client.write_registers(
+            ORCA_REGISTER.POSITION_CMD.value.address, list(_int32_to_uint16s(position))
+        )
+
     async def kinematic_trigger(self, motion_id: int):
-        return await self.write_register(
+        return await self.client.write_register(
             ORCA_REGISTER.KIN_SW_TRIGGER.value.address, motion_id
         )
 
-    # Configure Kinematic Motion
     async def configure_motion(
         self, motionID: int, position: int, time, delay, nextID, type, autonext
     ):
-        # positionL_H = obj.int32_to_u16(position);
-        # timeL_H = obj.int32_to_u16(time);
-        # next_type_auto = bitshift(nextID, 3) + bitshift(type, 1) + autonext;
-        # configuration = [positionL_H, timeL_H, delay,next_type_auto];
-        # obj.write_multi_registers(780 + motionID*6, 6, configuration);  % KIN_MOTION_0 780
-
         positionL, positionH = _int32_to_uint16s(position)
         timeL, timeH = _int32_to_uint16s(time)
         next_type_auto = (nextID << 3) + (type << 1) + autonext
         configuration = [positionL, positionH, timeL, timeH, delay, next_type_auto]
-        return await self.write_multi_registers(
+        return await self.client.write_registers(
             ORCA_REGISTER.KIN_MOTION_0.value.address + motionID * 6, configuration
         )
 
-    # Tune PID Values
-    async def tune_pid_controller(self, saturation, p_gain, i_gain, dv_gain, de_gain):
-        # saturationL_H = obj.int32_to_u16(saturation); %split 32 bit into 2 16 bit, low first hi second
-        # configuration = [p_gain, i_gain, dv_gain, de_gain , saturationL_H];
-        # obj.write_multi_registers(133, 6, configuration);  % PC_PGAIN 133, num consecutive registers 6, register values  configuration
-        saturationL, saturationH = _int32_to_uint16s(saturation)
-        configuration = [p_gain, i_gain, dv_gain, de_gain, saturationL, saturationH]
-        return await self.write_multi_registers(
-            ORCA_REGISTER.PC_PGAIN.value.address, configuration
-        )
-
-    # Check Kinematic Status
     async def kinematic_status(self):
-        return await self.read_registers(ORCA_REGISTER.KINEMATIC_STATUS.value.address)
-
-    # Position Command
-    async def position_command(self, position: int):
-        return await self.write_multi_registers(
-            ORCA_REGISTER.POSITION_CMD.value.address, list(_int32_to_uint16s(position))
+        return await self.client.read_holding_registers(
+            ORCA_REGISTER.KINEMATIC_STATUS.value.address
         )
 
-
-class StreamedActuator:
-
-    # use a class method to initialize the class while await for async connection
-    @classmethod
-    async def create(
-        cls, comport: str, baudrate: int, timeout: float, retries: int, dev_id: int = 1
-    ):
-        """
-        Asynchronous factory method to initialize the class with an asynchronous operation.
-        """
-        actuator = cls(comport, baudrate, timeout, retries, dev_id)
-        await actuator.__client.connect()
-        return actuator
-
-    # do not directly instantiate this class
-    def __init__(
-        self, comport: str, baudrate: int, timeout: float, retries: int, dev_id: int
-    ):
-        self.__client = AsyncModbusSerialClient(
-            comport, parity="E", baudrate=baudrate, timeout=timeout, retries=retries
-        )
-        self.__client.register(OrcaStreamManageResponsePDU)
-        self.__client.register(OrcaStreamCommandResponsePDU)
-        self.__client.register(OrcaStreamReadResponsePDU)
-        self.__client.register(OrcaStreamWriteResponsePDU)
-        self.__dev_id = dev_id
+    # ========== Below are Streamed Only ==========
 
     async def __set_stream_enable(self, enable: bool, baudrate: int, delay: int):
-        response: OrcaStreamManageResponsePDU = await self.__client.execute(
-            False, OrcaStreamManageRequestPDU(enable, baudrate, delay, dev_id=1)
+        response: OrcaStreamManageResponsePDU = await self.client.execute(
+            False,
+            OrcaStreamManageRequestPDU(enable, baudrate, delay, dev_id=self.dev_id),
         )  # type: ignore
         return response.baudrate, response.delay
 
-    async def enable_stream(self, baudrate: int, delay: int):
-        await self.__client.write_register(
-            ORCA_REGISTER.CTRL_REG_3.value.address, ORCA_MODE.SleepMode
-        )
+    async def stream_enable(self, baudrate: int, delay: int):
+        await self.set_mode(ORCA_MODE.SleepMode)
+        self.client.comm_params
         return await self.__set_stream_enable(True, baudrate, delay)
 
-    async def disable_stream(self):
+    async def stream_disable(self):
         return await self.__set_stream_enable(False, 0, 0)
 
-    async def motor_command(self, subcode: ORCA_MODE_SUBCODE, data: Optional[int]):
+    async def stream_motor_command(
+        self, subcode: ORCA_MODE_SUBCODE, data: Optional[int]
+    ):
         match subcode:
             case ORCA_MODE_SUBCODE.ForceControlStream:
-                if data is None:
-                    raise ValueError("ForceControlStream requires data.")
+                assert data is not None, "ForceControlStream requires data."
             case ORCA_MODE_SUBCODE.PositionControlStream:
-                if data is None:
-                    raise ValueError("PositionControlStream requires data.")
+                assert data is not None, "PositionControlStream requires data."
             case ORCA_MODE_SUBCODE.KinematicDataStream:
                 data = 0x00
             case ORCA_MODE_SUBCODE.HapticDataStream:
-                if data is None:
-                    raise ValueError("HapticDataStream requires data.")
+                assert data is not None, "HapticDataStream requires data."
             case ORCA_MODE_SUBCODE.SleepDataStream:
                 data = 0x00
             case _:
                 raise ValueError("Invalid subcode.")
-        response: OrcaStreamCommandResponsePDU = await self.__client.execute(
-            False, OrcaStreamCommandRequestPDU(subcode, data, dev_id=self.__dev_id)  # type: ignore
+        response: OrcaStreamCommandResponsePDU = await self.client.execute(
+            False, OrcaStreamCommandRequestPDU(subcode, data, dev_id=self.dev_id)  # type: ignore
         )
         if type(response) is ExceptionResponse:
             raise RuntimeError(f"Motor Error: Exception Response: {response}")
@@ -216,48 +154,50 @@ class StreamedActuator:
             raise RuntimeError(f"Motor Error: {response.stream_info.error}")
         return response.stream_info
 
-    async def motor_read(self, address: int, width: Literal[1] | Literal[2]):
-        response: OrcaStreamReadResponsePDU = await self.__client.execute(
-            False, OrcaStreamReadRequestPDU(address, width, dev_id=self.__dev_id)  # type: ignore
+    async def stream_motor_read(self, address: int, width: Literal[1] | Literal[2]):
+        response: OrcaStreamReadResponsePDU = await self.client.execute(
+            False, OrcaStreamReadRequestPDU(address, width, dev_id=self.dev_id)  # type: ignore
         )
         if response.stream_info.error:
             raise RuntimeError(f"Motor Error: {response.stream_info.error}")
         return response.register_value, response.mode_of_operation, response.stream_info
 
-    async def motor_write(
+    async def stream_motor_write(
         self, address: int, width: Literal[1] | Literal[2], data: int
     ):
-        response: OrcaStreamWriteResponsePDU = await self.__client.execute(
-            False, OrcaStreamWriteRequestPDU(address, width, data, dev_id=self.__dev_id)  # type: ignore
+        response: OrcaStreamWriteResponsePDU = await self.client.execute(
+            False, OrcaStreamWriteRequestPDU(address, width, data, dev_id=self.dev_id)  # type: ignore
         )
         if response.stream_info.error:
             raise RuntimeError(f"Motor Error: {response.stream_info.error}")
         return response.stream_info
 
-    async def tune_pid_controller(self, p: int, i: int, dv: int, de: int, sat: int):
+    async def stream_tune_pid_controller(
+        self, p: int, i: int, dv: int, de: int, sat: int
+    ):
         sat_lo, sat_hi = _int32_to_uint16s(sat)
-        await self.motor_write(
+        await self.stream_motor_write(
             ORCA_REGISTER.PC_PGAIN.value.address, ORCA_REGISTER.PC_PGAIN.value.width, p
         )
-        await self.motor_write(
+        await self.stream_motor_write(
             ORCA_REGISTER.PC_IGAIN.value.address, ORCA_REGISTER.PC_IGAIN.value.width, i
         )
-        await self.motor_write(
+        await self.stream_motor_write(
             ORCA_REGISTER.PC_DVGAIN.value.address,
             ORCA_REGISTER.PC_DVGAIN.value.width,
             dv,
         )
-        await self.motor_write(
+        await self.stream_motor_write(
             ORCA_REGISTER.PC_DEGAIN.value.address,
             ORCA_REGISTER.PC_DEGAIN.value.width,
             de,
         )
-        await self.motor_write(
+        await self.stream_motor_write(
             ORCA_REGISTER.PC_FSATU.value.address,
             ORCA_REGISTER.PC_FSATU.value.width,
             sat_lo,
         )
-        return await self.motor_write(
+        return await self.stream_motor_write(
             ORCA_REGISTER.PC_FSATU_H.value.address,
             ORCA_REGISTER.PC_FSATU_H.value.width,
             sat_hi,

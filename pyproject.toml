@@ -1,20 +1,17 @@
 [project]
-name = "orca-py"
-version = "0.0.1"
-description = "ORCA-py is an unofficial library for the ORCA Series motor from Iris Dynamics"
-authors = [
-    { name = "Yifei Liu", email = "34564223+EzekielDaun@users.noreply.github.com" },
-]
-readme = "README.md"
-requires-python = ">=3.10"
-dependencies = ["pymodbus (>=3.8.3,<4.0.0)", "pyserial (>=3.5,<4.0)"]
-
-[tool.poetry]
-packages = [{ include = "orca_py", from = "src" }]
+    authors = [
+        { name = "Yifei Liu", email = "34564223+EzekielDaun@users.noreply.github.com" },
+    ]
+    dependencies = ["pymodbus (>=3.8.3,<4.0.0)", "pyserial (>=3.5,<4.0)"]
+    description = "ORCA-py is an unofficial library for the ORCA Series motor from Iris Dynamics"
+    name = "orca-py"
+    readme = "README.md"
+    requires-python = ">=3.10"
+    version = "0.0.2"
 
 [tool.poetry.group.dev.dependencies]
-numpy = "^2.0.0"
+    numpy = "^2.0.0"
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+    build-backend = "poetry.core.masonry.api"
+    requires      = ["poetry-core>=2.0.0,<3.0.0"]
