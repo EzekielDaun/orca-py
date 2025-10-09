@@ -2,16 +2,19 @@
     authors = [
         { name = "Yifei Liu", email = "34564223+EzekielDaun@users.noreply.github.com" },
     ]
-    dependencies = ["pymodbus (>=3.8.3,<4.0.0)", "pyserial (>=3.5,<4.0)"]
+    dependencies = ["pymodbus (>=3,<4.0.0)", "pyserial (>=3.5,<4.0)"]
     description = "ORCA-py is an unofficial library for the ORCA Series motor from Iris Dynamics"
     name = "orca-py"
     readme = "README.md"
-    requires-python = ">=3.10"
+    requires-python = ">=3.9,<4"
     version = "0.0.2"
 
-[tool.poetry.group.dev.dependencies]
-    numpy = "^2.0.0"
+[project.optional-dependencies]
+    dev = ["numpy>=2.0.0,<3.0.0"]
 
 [build-system]
-    build-backend = "poetry.core.masonry.api"
-    requires      = ["poetry-core>=2.0.0,<3.0.0"]
+    build-backend = "hatchling.build"
+    requires      = ["hatchling>=1.25.0"]
+
+[tool.hatch.build.targets.wheel]
+    packages = ["src/orca_py"]
